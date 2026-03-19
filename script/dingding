@@ -35,6 +35,8 @@ DIAMOND_BOOSTS = [
 boost_commands = {}
 boost_timers = {}
 boost_tasks = []
+boosts_checked = False
+main_channel = None
 
 BUY_COMMAND_ID = 912432961134166090
 
@@ -46,6 +48,18 @@ async def pause():
 
 async def resume():
     pause_event.set()
+    if USE_FISH_BOOSTS and ACTIVATE_WORKERS and boost_timers and main_channel:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Resuming - checking boost status...")
+        current_time = time.time()
+        wait_time = 0
+        for boost_name, timer_data in boost_timers.items():
+            time_since_last = current_time - timer_data["last_sent"]
+            if time_since_last >= timer_data["interval"]:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Boost {boost_name} needs renewal, sending in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                await send_boost_command(main_channel, boost_name, "resume_check")
+                timer_data["last_sent"] = time.time()
+                wait_time += 3
 
 def keyboard_listener(loop):
     while True:
@@ -123,14 +137,26 @@ async def boost_scheduler(channel, boosts, offsets):
         await pause_event.wait()
         
         current_time = time.time()
+        send_queue = []
+        
         for boost_name, timer_data in boost_timers.items():
             time_since_last = current_time - timer_data["last_sent"]
             
             if time_since_last >= timer_data["interval"]:
-                success = await send_boost_command(channel, boost_name, "scheduler")
-                if success:
-                    timer_data["last_sent"] = current_time
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Next {boost_name} in {timer_data['interval']} seconds")
+                send_queue.append(boost_name)
+        
+        wait_time = 0
+        for boost_name in send_queue:
+            timer_data = boost_timers[boost_name]
+            success = await send_boost_command(channel, boost_name, "scheduler")
+            if success:
+                timer_data["last_sent"] = time.time()
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Next {boost_name} in {timer_data['interval']} seconds")
+            await asyncio.sleep(1)
+            wait_time += 1
+        
+        if send_queue:
+            await asyncio.sleep(max(0, 2 - wait_time))
         
         await asyncio.sleep(1)
 
@@ -225,8 +251,11 @@ async def on_message(message: discord.Message):
 
 @client.event
 async def on_ready(): 
+    global main_channel
+    
     print(f'[{time.strftime('%Y-%m-%d %H:%M:%S')}] We have logged in as {client.user}')
     channel = client.get_channel(CHANNEL_ID)
+    main_channel = channel
     commands = [command for command in await channel.application_commands()]
     fish = [command for command in commands if command.id == 912432960643416115][0]
     sell = [command for command in commands if command.id == 912432960643416116][0]

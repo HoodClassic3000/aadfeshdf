@@ -1,0 +1,309 @@
+import discord
+import asyncio
+import time
+import re
+
+import sys
+import threading
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = discord.Client()
+CHANNEL_ID = int(os.getenv('CHANNEL_ID', '0'))
+
+pause_event = asyncio.Event()
+pause_event.set()
+
+USE_FISH_BOOSTS = False
+ACTIVATE_WORKERS = False
+BOOST_TYPE = None
+
+GOLD_BOOSTS = [
+    {"name": "Auto10m", "duration": 600, "interval": 720},
+    {"name": "Fish5m", "duration": 300, "interval": 420},
+    {"name": "Treasure5m", "duration": 300, "interval": 420},
+]
+
+DIAMOND_BOOSTS = [
+    {"name": "Auto30m", "duration": 1800, "interval": 1920},
+    {"name": "Fish20m", "duration": 1200, "interval": 1320},
+    {"name": "Treasure20m", "duration": 1200, "interval": 1320},
+]
+
+boost_commands = {}
+boost_timers = {}
+boost_tasks = []
+
+BUY_COMMAND_ID = 912432961134166090
+
+FISH_COOLDOWN = 2.1
+cooldown_detected = False
+
+async def pause():
+    pause_event.clear()
+
+async def resume():
+    pause_event.set()
+
+def keyboard_listener(loop):
+    while True:
+        key = sys.stdin.read(1)
+        if key.lower() == 'p':
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Paused. Press 'r' to resume.")
+            asyncio.run_coroutine_threadsafe(pause(), loop)
+        elif key.lower() == 'r':
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Resumed.")
+            asyncio.run_coroutine_threadsafe(resume(), loop)
+
+def start_keyboard_listener(loop):
+    thread = threading.Thread(target=keyboard_listener, args=(loop,), daemon=True)
+    thread.start()
+
+async def list_commands(channel: discord.TextChannel):
+    commands = [command for command in await channel.application_commands()]
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Available Slash Commands:")
+    for command in commands:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] - {command.name} (ID: {command.id}) - {command.application_id}")
+
+def discover_buy_commands_by_id(commands):
+    global boost_commands
+    boost_commands = {}
+    
+    for cmd in commands:
+        if cmd.id == BUY_COMMAND_ID:
+            boost_commands['Auto'] = cmd
+            boost_commands['Fish'] = cmd
+            boost_commands['Treasure'] = cmd
+            break
+    
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Connected boost commands: {list(boost_commands.keys())}")
+
+async def send_boost_command(channel, boost_name, boost_type, max_retries=3):
+    cmd_key = boost_name.replace('10m', '').replace('20m', '').replace('30m', '').replace('5m', '').strip()
+    if cmd_key in boost_commands:
+        cmd = boost_commands[cmd_key]
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sending /buy {boost_name} ({boost_type})...")
+        
+        for attempt in range(max_retries):
+            try:
+                await cmd(channel, item=boost_name)
+                return True
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    wait_time = 0.5 * (2 ** attempt)
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Rate limited! Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+        
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to send {boost_name} after {max_retries} attempts")
+        return False
+    else:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Command for {boost_name} not found!")
+        return False
+
+async def boost_scheduler(channel, boosts, offsets):
+    global boost_timers
+    boost_timers = {}
+    
+    for i, boost in enumerate(boosts):
+        boost_name = boost["name"]
+        interval = boost["interval"]
+        offset = offsets[i]
+        
+        boost_timers[boost_name] = {
+            "last_sent": time.time() - (boost["duration"] - interval) + offset,
+            "interval": interval,
+            "boost": boost
+        }
+    
+    while True:
+        await pause_event.wait()
+        
+        current_time = time.time()
+        for boost_name, timer_data in boost_timers.items():
+            time_since_last = current_time - timer_data["last_sent"]
+            
+            if time_since_last >= timer_data["interval"]:
+                success = await send_boost_command(channel, boost_name, "scheduler")
+                if success:
+                    timer_data["last_sent"] = current_time
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Next {boost_name} in {timer_data['interval']} seconds")
+        
+        await asyncio.sleep(1)
+
+def parse_time_left(time_str):
+    total_seconds = 0
+    minutes = re.search(r'(\d+)m', time_str)
+    seconds = re.search(r'(\d+)s', time_str)
+    
+    if minutes:
+        total_seconds += int(minutes.group(1)) * 60
+    if seconds:
+        total_seconds += int(seconds.group(1))
+    
+    return total_seconds
+
+async def handle_boost_response(message: discord.Message):
+    global FISH_COOLDOWN, cooldown_detected
+    
+    if message.channel.id != CHANNEL_ID:
+        return
+    
+    if not message.embeds:
+        return
+    
+    embed = message.embeds[0]
+    if not embed.description:
+        return
+    
+    desc = embed.description
+    
+    already_boosting = "You are already boosting that!" in desc
+    worker_active = "You already have a worker working." in desc
+    
+    if already_boosting or worker_active:
+        match = re.search(r'Time left: (.+)', desc)
+        if match:
+            time_str = match.group(1).strip()
+            seconds_left = parse_time_left(time_str)
+            
+            if already_boosting:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Boost already active! Time left: {time_str} ({seconds_left}s)")
+            elif worker_active:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Worker already active! Time left: {time_str} ({seconds_left}s)")
+            
+            for boost_name, timer_data in boost_timers.items():
+                boost_duration = timer_data["boost"]["duration"]
+                if seconds_left < boost_duration:
+                    new_interval = seconds_left + 120
+                    timer_data["interval"] = new_interval
+                    timer_data["last_sent"] = time.time() - (timer_data["boost"]["duration"] - new_interval)
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Adjusted {boost_name} timer to {new_interval} seconds")
+    
+    cooldown_match = re.search(r'Your cooldown: ([\d.]+)s', desc)
+    if cooldown_match:
+        new_cooldown = float(cooldown_match.group(1))
+        if new_cooldown != FISH_COOLDOWN:
+            FISH_COOLDOWN = new_cooldown
+            cooldown_detected = True
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected fish cooldown: {FISH_COOLDOWN}s")
+    
+    wait_match = re.search(r'You must wait ([\d.]+)s before fishing again', desc)
+    if wait_match:
+        wait_time = float(wait_match.group(1))
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Cooldown active! Waiting {wait_time}s before retry...")
+        await asyncio.sleep(wait_time + 0.5)
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author.id == 574652751745777665 and message.embeds:
+        if message.embeds[0].title and "verify" in message.embeds[0].title:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] message.embeds[0].title: {message.embeds[0].title}")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Verification message detected. Attempting to verify...")
+            await pause()
+            await asyncio.sleep(1)
+            channel = message.channel
+            commands = [command for command in await channel.application_commands()]
+            verify = [command for command in commands if command.id == 912432961222238220][0]
+            code = message.embeds[0].description.split("**")[1]
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Extracted code: {code}")
+            await verify(channel, answer=code)
+            await resume() 
+            await asyncio.sleep(1)
+        else:
+            await handle_boost_response(message)
+            cooldown_match = re.search(r'Your cooldown: ([\d.]+)s', message.content)
+            if cooldown_match:
+                new_cooldown = float(cooldown_match.group(1))
+                if new_cooldown != FISH_COOLDOWN:
+                    FISH_COOLDOWN = new_cooldown
+                    cooldown_detected = True
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected fish cooldown: {FISH_COOLDOWN}s")
+
+@client.event
+async def on_ready(): 
+    print(f'[{time.strftime('%Y-%m-%d %H:%M:%S')}] We have logged in as {client.user}')
+    channel = client.get_channel(CHANNEL_ID)
+    commands = [command for command in await channel.application_commands()]
+    fish = [command for command in commands if command.id == 912432960643416115][0]
+    sell = [command for command in commands if command.id == 912432960643416116][0]
+    
+    loop = asyncio.get_running_loop()
+    start_keyboard_listener(loop)
+    
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Press 'p' to pause, 'r' to resume.")
+    
+    if USE_FISH_BOOSTS and ACTIVATE_WORKERS:
+        discover_buy_commands_by_id(commands)
+        
+        if BOOST_TYPE == "gold":
+            boosts = GOLD_BOOSTS
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Using Gold Fish boosts")
+        else:
+            boosts = DIAMOND_BOOSTS
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Using Diamond Fish boosts")
+        
+        offsets = [0, 15, 30]
+        
+        for i, boost in enumerate(boosts):
+            await send_boost_command(channel, boost["name"], BOOST_TYPE)
+            await asyncio.sleep(3)
+        
+        boost_task = asyncio.create_task(boost_scheduler(channel, boosts, offsets))
+        boost_tasks.append(boost_task)
+    
+    while True:
+        await pause_event.wait()
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Fishing... (cooldown: {FISH_COOLDOWN}s)")
+        await fish(channel)
+        await asyncio.sleep(FISH_COOLDOWN + 0.5)
+
+def prompt_user():
+    global USE_FISH_BOOSTS, ACTIVATE_WORKERS, BOOST_TYPE
+    
+    print("\n" + "="*50)
+    print("Fish Boosts Configuration")
+    print("="*50)
+    
+    while True:
+        response = input("Use fish boosts? (Y/N): ").strip().lower()
+        if response in ['yes', 'y']:
+            USE_FISH_BOOSTS = True
+            break
+        elif response in ['no', 'n']:
+            USE_FISH_BOOSTS = False
+            break
+        print("Please enter Y or N")
+    
+    if USE_FISH_BOOSTS:
+        while True:
+            response = input("Activate workers? (Y/N): ").strip().lower()
+            if response in ['yes', 'y']:
+                ACTIVATE_WORKERS = True
+                break
+            elif response in ['no', 'n']:
+                ACTIVATE_WORKERS = False
+                break
+            print("Please enter Y or N")
+        
+        if ACTIVATE_WORKERS:
+            while True:
+                response = input("Use gold fish or diamond fish? (G/D): ").strip().lower()
+                if response == 'g':
+                    BOOST_TYPE = "gold"
+                    break
+                elif response == 'd':
+                    BOOST_TYPE = "diamond"
+                    break
+                print("Please enter g for gold or d for diamond")
+    
+    print("="*50)
+    print(f"Configuration: Boosts={USE_FISH_BOOSTS}, Workers={ACTIVATE_WORKERS}, Type={BOOST_TYPE}")
+    print("="*50 + "\n")
+
+if __name__ == "__main__":
+    prompt_user()
+    client.run(os.getenv('DISCORD_TOKEN', ''))

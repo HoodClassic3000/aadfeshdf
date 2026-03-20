@@ -214,9 +214,22 @@ async def boost_failsafe_scheduler(channel):
             
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running failsafe boost check...")
             
+            current_time = time.time()
             wait_time = 0
             for boost in boosts:
                 await asyncio.sleep(wait_time)
+                
+                if boost['name'] in boost_timers:
+                    timer_data = boost_timers[boost['name']]
+                    time_since_last = current_time - timer_data["last_sent"]
+                    boost_duration = timer_data["boost"]["duration"]
+                    
+                    if time_since_last < boost_duration:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {boost['name']} still active ({int(boost_duration - time_since_last)}s left), skipping failsafe")
+                        await asyncio.sleep(2)
+                        wait_time += 3
+                        continue
+                
                 success = await send_boost_command(channel, boost['buy_name'])
                 if success:
                     if boost['name'] in boost_timers:

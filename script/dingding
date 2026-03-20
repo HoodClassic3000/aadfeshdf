@@ -21,45 +21,35 @@ ACTIVATE_WORKERS = False
 BOOST_TYPE = None
 
 GOLD_BOOSTS = [
-    {"name": "Auto10m", "duration": 600, "interval": 720},
-    {"name": "Fish5m", "duration": 300, "interval": 420},
-    {"name": "Treasure5m", "duration": 300, "interval": 420},
+    {"name": "Auto10m", "duration": 600, "interval": 720, "buy_name": "Auto10m"},
+    {"name": "Fish5m", "duration": 300, "interval": 420, "buy_name": "Fish5m"},
+    {"name": "Treasure5m", "duration": 300, "interval": 420, "buy_name": "Treasure5m"},
 ]
 
 DIAMOND_BOOSTS = [
-    {"name": "Auto30m", "duration": 1800, "interval": 1920},
-    {"name": "Fish20m", "duration": 1200, "interval": 1320},
-    {"name": "Treasure20m", "duration": 1200, "interval": 1320},
+    {"name": "Auto30m", "duration": 1800, "interval": 1920, "buy_name": "Auto30m"},
+    {"name": "Fish20m", "duration": 1200, "interval": 1320, "buy_name": "Fish20m"},
+    {"name": "Treasure20m", "duration": 1200, "interval": 1320, "buy_name": "Treasure20m"},
 ]
 
 boost_commands = {}
-boost_timers = {}
-boost_tasks = []
-boosts_checked = False
 main_channel = None
-
-BUY_COMMAND_ID = 912432961134166090
+boosts = []
+boost_timers = {}
+boost_timer_task = None
+boost_failsafe_task = None
+schedulers_started = False
 
 FISH_COOLDOWN = 2.1
-cooldown_detected = False
+
+BUY_COMMAND_ID = 912432961134166090
 
 async def pause():
     pause_event.clear()
 
 async def resume():
     pause_event.set()
-    if USE_FISH_BOOSTS and ACTIVATE_WORKERS and boost_timers and main_channel:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Resuming - checking boost status...")
-        current_time = time.time()
-        wait_time = 0
-        for boost_name, timer_data in boost_timers.items():
-            time_since_last = current_time - timer_data["last_sent"]
-            if time_since_last >= timer_data["interval"]:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Boost {boost_name} needs renewal, sending in {wait_time}s...")
-                await asyncio.sleep(wait_time)
-                await send_boost_command(main_channel, boost_name, "resume_check")
-                timer_data["last_sent"] = time.time()
-                wait_time += 3
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Resumed")
 
 def keyboard_listener(loop):
     while True:
@@ -75,13 +65,7 @@ def start_keyboard_listener(loop):
     thread = threading.Thread(target=keyboard_listener, args=(loop,), daemon=True)
     thread.start()
 
-async def list_commands(channel: discord.TextChannel):
-    commands = [command for command in await channel.application_commands()]
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Available Slash Commands:")
-    for command in commands:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] - {command.name} (ID: {command.id}) - {command.application_id}")
-
-def discover_buy_commands_by_id(commands):
+def discover_buy_commands(commands):
     global boost_commands
     boost_commands = {}
     
@@ -93,72 +77,6 @@ def discover_buy_commands_by_id(commands):
             break
     
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Connected boost commands: {list(boost_commands.keys())}")
-
-async def send_boost_command(channel, boost_name, boost_type, max_retries=3):
-    cmd_key = boost_name.replace('10m', '').replace('20m', '').replace('30m', '').replace('5m', '').strip()
-    if cmd_key in boost_commands:
-        cmd = boost_commands[cmd_key]
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sending /buy {boost_name} ({boost_type})...")
-        
-        for attempt in range(max_retries):
-            try:
-                await cmd(channel, item=boost_name)
-                return True
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    wait_time = 0.5 * (2 ** attempt)
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Rate limited! Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
-        
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to send {boost_name} after {max_retries} attempts")
-        return False
-    else:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Command for {boost_name} not found!")
-        return False
-
-async def boost_scheduler(channel, boosts, offsets):
-    global boost_timers
-    boost_timers = {}
-    
-    for i, boost in enumerate(boosts):
-        boost_name = boost["name"]
-        interval = boost["interval"]
-        offset = offsets[i]
-        
-        boost_timers[boost_name] = {
-            "last_sent": time.time() - (boost["duration"] - interval) + offset,
-            "interval": interval,
-            "boost": boost
-        }
-    
-    while True:
-        await pause_event.wait()
-        
-        current_time = time.time()
-        send_queue = []
-        
-        for boost_name, timer_data in boost_timers.items():
-            time_since_last = current_time - timer_data["last_sent"]
-            
-            if time_since_last >= timer_data["interval"]:
-                send_queue.append(boost_name)
-        
-        wait_time = 0
-        for boost_name in send_queue:
-            timer_data = boost_timers[boost_name]
-            success = await send_boost_command(channel, boost_name, "scheduler")
-            if success:
-                timer_data["last_sent"] = time.time()
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Next {boost_name} in {timer_data['interval']} seconds")
-            await asyncio.sleep(1)
-            wait_time += 1
-        
-        if send_queue:
-            await asyncio.sleep(max(0, 2 - wait_time))
-        
-        await asyncio.sleep(1)
 
 def parse_time_left(time_str):
     total_seconds = 0
@@ -172,10 +90,153 @@ def parse_time_left(time_str):
     
     return total_seconds
 
-async def handle_boost_response(message: discord.Message):
-    global FISH_COOLDOWN, cooldown_detected
+async def send_boost_command(channel, boost_name, max_retries=3):
+    if not channel:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No channel available for {boost_name}")
+        return False
+        
+    cmd_key = boost_name.replace('10m', '').replace('20m', '').replace('30m', '').replace('5m', '').strip()
+    if cmd_key in boost_commands:
+        cmd = boost_commands[cmd_key]
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sending /buy {boost_name}...")
+        
+        for attempt in range(max_retries):
+            try:
+                await cmd(channel, item=boost_name)
+                return True
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    wait_time = 0.5 * (2 ** attempt)
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Rate limited! Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+            except Exception as e:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error sending boost: {e}")
+                await asyncio.sleep(1)
+        
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to send {boost_name} after {max_retries} attempts")
+        return False
+    else:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Command for {boost_name} not found!")
+        return False
+
+async def initialize_boosts_with_retry(channel, max_attempts=3):
+    global boost_timers, boosts
     
-    if message.channel.id != CHANNEL_ID:
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Initializing boosts...")
+    
+    boost_timers = {}
+    
+    for attempt in range(max_attempts):
+        try:
+            wait_time = 0
+            for boost in boosts:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sending initial {boost['buy_name']} in {wait_time}s (attempt {attempt+1}/{max_attempts})...")
+                await asyncio.sleep(wait_time)
+                
+                success = await send_boost_command(channel, boost['buy_name'])
+                
+                if success:
+                    boost_timers[boost['name']] = {
+                        "last_sent": time.time(),
+                        "interval": boost["interval"],
+                        "boost": boost
+                    }
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {boost['name']} timer set to {boost['interval']}s")
+                
+                await asyncio.sleep(1)
+                wait_time += 3
+            
+            if boost_timers:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Initial boosts sent. Timer-based renewal active.")
+                return True
+            else:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No boosts initialized on attempt {attempt+1}")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(5)
+                    
+        except Exception as e:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Boost initialization error on attempt {attempt+1}: {e}")
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(5)
+    
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to initialize boosts after {max_attempts} attempts")
+    return False
+
+async def boost_timer_scheduler(channel):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Boost timer scheduler started")
+    
+    while True:
+        try:
+            await pause_event.wait()
+            await asyncio.sleep(1)
+            
+            current_time = time.time()
+            send_queue = []
+            
+            for boost_name, timer_data in boost_timers.items():
+                time_since_last = current_time - timer_data["last_sent"]
+                
+                if time_since_last >= timer_data["interval"]:
+                    send_queue.append(boost_name)
+            
+            if send_queue:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Timer check: {len(send_queue)} boosts need renewal")
+            
+            wait_time = 0
+            for boost_name in send_queue:
+                timer_data = boost_timers[boost_name]
+                success = await send_boost_command(channel, timer_data["boost"]["buy_name"])
+                if success:
+                    timer_data["last_sent"] = time.time()
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {boost_name} renewed by timer, next in {timer_data['interval']}s")
+                await asyncio.sleep(1)
+                wait_time += 1
+            
+            if send_queue:
+                await asyncio.sleep(max(0, 2 - wait_time))
+                
+        except Exception as e:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Timer scheduler error: {e}")
+            await asyncio.sleep(30)
+
+async def boost_failsafe_scheduler(channel):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Boost failsafe scheduler started")
+    
+    failsafe_interval = 600 if BOOST_TYPE == "gold" else 1800
+    
+    await asyncio.sleep(failsafe_interval)
+    
+    while True:
+        try:
+            await pause_event.wait()
+            
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running failsafe boost check...")
+            
+            wait_time = 0
+            for boost in boosts:
+                await asyncio.sleep(wait_time)
+                success = await send_boost_command(channel, boost['buy_name'])
+                if success:
+                    if boost['name'] in boost_timers:
+                        boost_timers[boost['name']]["last_sent"] = time.time()
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {boost['name']} renewed by failsafe")
+                await asyncio.sleep(2)
+                wait_time += 3
+            
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failsafe check complete. Next in {failsafe_interval}s")
+            
+            await asyncio.sleep(failsafe_interval)
+            
+        except Exception as e:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failsafe scheduler error: {e}")
+            await asyncio.sleep(30)
+
+async def handle_boost_response(message: discord.Message):
+    global FISH_COOLDOWN
+    
+    if not message.channel or message.channel.id != CHANNEL_ID:
         return
     
     if not message.embeds:
@@ -207,14 +268,13 @@ async def handle_boost_response(message: discord.Message):
                     new_interval = seconds_left + 120
                     timer_data["interval"] = new_interval
                     timer_data["last_sent"] = time.time() - (timer_data["boost"]["duration"] - new_interval)
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Adjusted {boost_name} timer to {new_interval} seconds")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Synced {boost_name} timer to {new_interval}s")
     
     cooldown_match = re.search(r'Your cooldown: ([\d.]+)s', desc)
     if cooldown_match:
         new_cooldown = float(cooldown_match.group(1))
         if new_cooldown != FISH_COOLDOWN:
             FISH_COOLDOWN = new_cooldown
-            cooldown_detected = True
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected fish cooldown: {FISH_COOLDOWN}s")
     
     wait_match = re.search(r'You must wait ([\d.]+)s before fishing again', desc)
@@ -227,7 +287,6 @@ async def handle_boost_response(message: discord.Message):
 async def on_message(message: discord.Message):
     if message.author.id == 574652751745777665 and message.embeds:
         if message.embeds[0].title and "verify" in message.embeds[0].title:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] message.embeds[0].title: {message.embeds[0].title}")
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Verification message detected. Attempting to verify...")
             await pause()
             await asyncio.sleep(1)
@@ -241,20 +300,18 @@ async def on_message(message: discord.Message):
             await asyncio.sleep(1)
         else:
             await handle_boost_response(message)
-            cooldown_match = re.search(r'Your cooldown: ([\d.]+)s', message.content)
-            if cooldown_match:
-                new_cooldown = float(cooldown_match.group(1))
-                if new_cooldown != FISH_COOLDOWN:
-                    FISH_COOLDOWN = new_cooldown
-                    cooldown_detected = True
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected fish cooldown: {FISH_COOLDOWN}s")
 
 @client.event
 async def on_ready(): 
-    global main_channel
+    global main_channel, boosts, schedulers_started
     
     print(f'[{time.strftime('%Y-%m-%d %H:%M:%S')}] We have logged in as {client.user}')
     channel = client.get_channel(CHANNEL_ID)
+    
+    if not channel:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ERROR: Could not find channel {CHANNEL_ID}")
+        return
+        
     main_channel = channel
     commands = [command for command in await channel.application_commands()]
     fish = [command for command in commands if command.id == 912432960643416115][0]
@@ -265,29 +322,35 @@ async def on_ready():
     
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Press 'p' to pause, 'r' to resume.")
     
-    if USE_FISH_BOOSTS and ACTIVATE_WORKERS:
-        discover_buy_commands_by_id(commands)
+    if USE_FISH_BOOSTS and ACTIVATE_WORKERS and not schedulers_started:
+        discover_buy_commands(commands)
         
         if BOOST_TYPE == "gold":
             boosts = GOLD_BOOSTS
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Using Gold Fish boosts")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Using Gold Fish boosts (failsafe: 10 min)")
         else:
             boosts = DIAMOND_BOOSTS
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Using Diamond Fish boosts")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Using Diamond Fish boosts (failsafe: 30 min)")
         
-        offsets = [0, 15, 30]
+        success = await initialize_boosts_with_retry(channel)
         
-        for i, boost in enumerate(boosts):
-            await send_boost_command(channel, boost["name"], BOOST_TYPE)
-            await asyncio.sleep(3)
-        
-        boost_task = asyncio.create_task(boost_scheduler(channel, boosts, offsets))
-        boost_tasks.append(boost_task)
+        if success:
+            schedulers_started = True
+            boost_timer_task = asyncio.create_task(boost_timer_scheduler(channel))
+            boost_failsafe_task = asyncio.create_task(boost_failsafe_scheduler(channel))
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Boost schedulers started")
+        else:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to start boost schedulers")
     
     while True:
         await pause_event.wait()
+        if not main_channel:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: Main channel unavailable, skipping fish")
+            await asyncio.sleep(5)
+            continue
+            
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Fishing... (cooldown: {FISH_COOLDOWN}s)")
-        await fish(channel)
+        await fish(main_channel)
         await asyncio.sleep(FISH_COOLDOWN + 0.5)
 
 def prompt_user():
@@ -320,7 +383,7 @@ def prompt_user():
         
         if ACTIVATE_WORKERS:
             while True:
-                response = input("Use gold fish or diamond fish? (G/D): ").strip().lower()
+                response = input("Use gold fish or diamond fish? (g/d): ").strip().lower()
                 if response == 'g':
                     BOOST_TYPE = "gold"
                     break
